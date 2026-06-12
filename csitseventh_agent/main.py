@@ -1,8 +1,9 @@
 import json
 from pathlib import Path
+from datetime import date
 from typing import Any, Dict
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
@@ -14,6 +15,8 @@ except ImportError:
 
 
 BASE_DIR = Path(__file__).resolve().parent
+DAILY_MESSAGE_LIMIT = 3
+usage_by_user: Dict[str, Dict[str, Any]] = {}
 
 app = FastAPI(title="CSIT 7th Sem Study Solver")
 
@@ -28,6 +31,30 @@ app.add_middleware(
 
 class SolveRequest(BaseModel):
     problem: str
+
+
+def _client_key(request: Request) -> str:
+    forwarded_for = request.headers.get("x-forwarded-for")
+    if forwarded_for:
+        return forwarded_for.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def _check_daily_limit(user_key: str) -> None:
+    today = date.today().isoformat()
+    usage = usage_by_user.get(user_key)
+
+    if not usage or usage.get("date") != today:
+        usage_by_user[user_key] = {"date": today, "count": 0}
+        usage = usage_by_user[user_key]
+
+    if usage["count"] >= DAILY_MESSAGE_LIMIT:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Daily limit reached. You can ask {DAILY_MESSAGE_LIMIT} questions per day.",
+        )
+
+    usage["count"] += 1
 
 
 def _to_plain_dict(value: Any) -> Dict[str, Any]:
@@ -57,10 +84,11 @@ def health() -> Dict[str, str]:
 
 
 @app.post("/solve")
-def solve(payload: SolveRequest) -> StreamingResponse:
+def solve(payload: SolveRequest, request: Request) -> StreamingResponse:
     problem = payload.problem.strip()
     if not problem:
         raise HTTPException(status_code=400, detail="Problem is required.")
+    _check_daily_limit(_client_key(request))
 
     def stream():
         try:
